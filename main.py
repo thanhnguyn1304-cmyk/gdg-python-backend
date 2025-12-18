@@ -1,5 +1,6 @@
 import os
 import random
+import json
 import firebase_admin
 from firebase_admin import auth
 from fastapi import FastAPI, Depends, HTTPException, Header
@@ -9,30 +10,45 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, Da
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import datetime
+import google.generativeai as genai
+from dotenv import load_dotenv
 
-# --- 1. SETUP DATABASE ---
+# 1. LOAD BIẾN MÔI TRƯỜNG (BẢO MẬT)
+load_dotenv() # Đọc file .env ở local
+
+# Lấy Key từ môi trường (Render hoặc .env)
 DATABASE_URL = os.getenv("DATABASE_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Fix lỗi link DB của Render/Neon
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Cấu hình AI
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    print("CẢNH BÁO: Chưa có GEMINI_API_KEY!")
+
+# 2. SETUP DATABASE
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# Model Activities (Khớp với bảng SQL)
 class Activity(Base):
     __tablename__ = "activities"
     id = Column(Integer, primary_key=True, index=True)
     user_uid = Column(String, index=True)
-    title = Column(String)
-    description = Column(Text)
-    priority = Column(String, default="Medium")
-    is_completed = Column(Boolean, default=False)
+    title = Column(String)       # Ví dụ: "Đọc sách Nhà Giả Kim"
+    description = Column(Text)   # Ví dụ: "Một cuốn sách về ước mơ..."
+    image_url = Column(String)   # Link ảnh
+    is_completed = Column(Boolean, default=False) # True = Đã làm xong (Achievement)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
-# --- 2. SETUP APP ---
+# 3. SETUP APP
 if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
@@ -42,26 +58,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. KHO DỮ LIỆU MẪU (DATA SEED) ---
-SAMPLE_ACTIVITIES = [
-    {"title": "Chạy bộ 5km", "desc": "Xỏ giày vào và ra công viên ngay.", "icon": "🔥", "color": "from-cyan-400 to-blue-500"},
-    {"title": "Cafe làm việc", "desc": "Đổi gió ra Highlands/Starbucks ngồi.", "icon": "☕", "color": "from-orange-400 to-red-500"},
-    {"title": "Xem phim rạp", "desc": "Check CGV xem có bom tấn gì mới.", "icon": "🎬", "color": "from-purple-400 to-pink-500"},
-    {"title": "Nhậu lai rai", "desc": "Alo hội bạn thân làm vài ly.", "icon": "🍺", "color": "from-yellow-400 to-orange-500"},
-    {"title": "Đọc sách 30p", "desc": "Tắt điện thoại, mở sách ra.", "icon": "📚", "color": "from-green-400 to-emerald-500"},
-    {"title": "Dọn dẹp nhà", "desc": "Bật nhạc to lên và dọn phòng.", "icon": "🧹", "color": "from-gray-400 to-gray-600"},
-    {"title": "Đi bơi", "desc": "Hạ nhiệt mùa hè tại bể bơi.", "icon": "🏊", "color": "from-blue-400 to-cyan-300"},
-    {"title": "Leo núi trong nhà", "desc": "Thử thách bản thân với bộ môn mới.", "icon": "🧗", "color": "from-stone-500 to-stone-700"},
-    {"title": "Nấu ăn món mới", "desc": "Tìm công thức và vào bếp trổ tài.", "icon": "🍳", "color": "from-orange-500 to-yellow-500"},
-    {"title": "Chơi Board Game", "desc": "Rủ bạn bè chơi Ma Sói, Mèo Nổ.", "icon": "🎲", "color": "from-red-500 to-purple-600"},
-    {"title": "Đi bảo tàng", "desc": "Khám phá văn hóa và lịch sử.", "icon": "🏛️", "color": "from-amber-600 to-amber-800"},
-    {"title": "Nghe Podcast", "desc": "Vừa làm việc nhà vừa nạp kiến thức.", "icon": "🎧", "color": "from-violet-500 to-purple-500"},
-    {"title": "Viết nhật ký", "desc": "Ghi lại những suy nghĩ trong ngày.", "icon": "✍️", "color": "from-neutral-500 to-neutral-700"},
-    {"title": "Học nhạc cụ", "desc": "Tập chơi Guitar hoặc Ukulele.", "icon": "🎸", "color": "from-rose-400 to-rose-600"},
-    {"title": "Thiền định", "desc": "Dành 10 phút tịnh tâm, thư giãn.", "icon": "🧘", "color": "from-teal-400 to-teal-600"}
-]
-
-# --- 4. UTILS ---
+# 4. UTILS
 def get_db():
     db = SessionLocal()
     try: yield db
@@ -74,53 +71,94 @@ async def verify_token(authorization: str = Header(...)):
     except:
         raise HTTPException(status_code=401, detail="Token invalid")
 
-# --- 5. DATA MODELS (Pydantic) ---
+# 5. API AI THÔNG MINH
+@app.get("/api/suggestions")
+def get_ai_suggestions(user_uid: str = None, db: Session = Depends(get_db)):
+    # Lấy sở thích cũ (những cái đã completed hoặc saved)
+    history_text = "người dùng mới"
+    if user_uid:
+        past = db.query(Activity).filter(Activity.user_uid == user_uid).order_by(Activity.id.desc()).limit(5).all()
+        if past:
+            titles = ", ".join([p.title for p in past])
+            history_text = f"Người dùng đã thích: {titles}"
+
+    # Prompt: Yêu cầu cụ thể để tạo Achievement
+    prompt = f"""
+    Đóng vai trợ lý lối sống (Lifestyle Assistant). {history_text}.
+    Hãy gợi ý 5 hoạt động tiếp theo thật CỤ THỂ (Specific). 
+    Ví dụ: Thay vì "Đọc sách", hãy gợi ý "Đọc cuốn Rừng Na Uy". Thay vì "Đi cafe", hãy "Đi cafe trứng Giảng Võ".
+    
+    Yêu cầu trả về JSON format chính xác như sau:
+    [
+        {{
+            "title": "Tên hoạt động cụ thể",
+            "desc": "Mô tả ngắn gọn, hấp dẫn (1 câu)",
+            "keyword": "Từ khóa tiếng Anh ngắn gọn để tìm ảnh (ví dụ: book, coffee, running)"
+        }}
+    ]
+    Chỉ trả về JSON thuần, không markdown.
+    """
+    
+    try:
+        if not GEMINI_API_KEY: raise Exception("No API Key")
+        
+        response = model.generate_content(prompt)
+        text_clean = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text_clean)
+        
+        # Xử lý ảnh và ID
+        results = []
+        for idx, item in enumerate(data):
+            # Dùng Pollinations AI để tạo ảnh từ keyword (Miễn phí, đẹp)
+            img_url = f"https://image.pollinations.ai/prompt/{item['keyword']}?width=400&height=600&nologo=true"
+            results.append({
+                "id": idx + 9999,
+                "title": item['title'],
+                "desc": item['desc'],
+                "image_url": img_url # Ảnh thật thay vì Icon
+            })
+        return results
+
+    except Exception as e:
+        print(f"Lỗi AI: {e}")
+        # Dữ liệu dự phòng nếu AI lỗi
+        fallback_img = "https://image.pollinations.ai/prompt/relax?width=400&height=600"
+        return [
+            {"id": 1, "title": "Kết nối AI...", "desc": "Đang gọi Gemini, thử lại sau nhé!", "image_url": fallback_img}
+        ]
+
+# 6. CÁC API KHÁC
 class ActivityCreate(BaseModel):
     title: str
-    description: str = ""
-    priority: str = "Medium"
+    description: str
+    image_url: str
 
-# --- 6. APIs ---
+class ActivityUpdate(BaseModel):
+    is_completed: bool
 
-@app.get("/")
-def home(): return {"msg": "Autonomy API Ready"}
-
-# --- API MỚI: LẤY GỢI Ý NGẪU NHIÊN ---
-@app.get("/api/suggestions")
-def get_suggestions():
-    # Lấy ngẫu nhiên tối đa 10 hoạt động từ kho mẫu
-    num_to_select = min(len(SAMPLE_ACTIVITIES), 10)
-    shuffled = random.sample(SAMPLE_ACTIVITIES, num_to_select)
-    
-    results = []
-    for idx, item in enumerate(shuffled):
-        results.append({
-            "id": idx + 1000, # ID giả để Frontend dùng làm key
-            "title": item["title"],
-            "desc": item["desc"],
-            "icon": item["icon"],
-            "color": item["color"]
-        })
-    return results
-
-# Lấy danh sách hoạt động ĐÃ LƯU của User
 @app.get("/api/activities")
-def get_activities(user = Depends(verify_token), db: Session = Depends(get_db)):
+def get_my_list(user = Depends(verify_token), db: Session = Depends(get_db)):
     return db.query(Activity).filter(Activity.user_uid == user['uid']).order_by(Activity.id.desc()).all()
 
-# Lưu hoạt động (Khi quẹt phải)
 @app.post("/api/activities")
-def create_activity(item: ActivityCreate, user = Depends(verify_token), db: Session = Depends(get_db)):
-    new_act = Activity(user_uid=user['uid'], title=item.title, description=item.description, priority=item.priority)
+def save_activity(item: ActivityCreate, user = Depends(verify_token), db: Session = Depends(get_db)):
+    # Lưu vào DB
+    new_act = Activity(user_uid=user['uid'], title=item.title, description=item.description, image_url=item.image_url)
     db.add(new_act)
     db.commit()
-    return {"msg": "Success", "data": new_act}
+    return {"msg": "Saved"}
 
-# Xóa hoạt động
+@app.put("/api/activities/{act_id}")
+def update_status(act_id: int, item: ActivityUpdate, user = Depends(verify_token), db: Session = Depends(get_db)):
+    # Đánh dấu đã xong (Achievement unlocked)
+    act = db.query(Activity).filter(Activity.id == act_id, Activity.user_uid == user['uid']).first()
+    if act:
+        act.is_completed = item.is_completed
+        db.commit()
+    return {"msg": "Updated"}
+
 @app.delete("/api/activities/{act_id}")
 def delete_activity(act_id: int, user = Depends(verify_token), db: Session = Depends(get_db)):
-    act = db.query(Activity).filter(Activity.id == act_id, Activity.user_uid == user['uid']).first()
-    if not act: raise HTTPException(404, "Not found")
-    db.delete(act)
+    db.query(Activity).filter(Activity.id == act_id, Activity.user_uid == user['uid']).delete()
     db.commit()
     return {"msg": "Deleted"}
