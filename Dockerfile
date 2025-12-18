@@ -1,13 +1,22 @@
-# Dùng bản Python nhẹ nhất
-FROM python:3.9-slim
+# backend/Dockerfile
 
-# Setup môi trường
+# 1. Dùng Python 3.9
+FROM python:3.9
+
+# 2. Tạo thư mục làm việc
 WORKDIR /app
+
+# 3. Copy file thư viện vào trước (để tận dụng cache)
+COPY requirements.txt .
+
+# 4. Cài đặt thư viện
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 5. Copy toàn bộ code vào
 COPY . .
 
-# Cài thư viện
-RUN pip install --no-cache-dir fastapi uvicorn firebase-admin psycopg2-binary
+# 6. Mở cổng 8080 (Render cần cổng này)
+EXPOSE 8080
 
-# Mở cổng 8080 (Cloud Run thích cổng này)
-ENV PORT=8080
+# 7. Lệnh chạy server
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
