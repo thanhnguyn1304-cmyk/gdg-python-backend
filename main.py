@@ -1,101 +1,43 @@
-# backend/main.py
-import os
-import firebase_admin
-from firebase_admin import auth
-from fastapi import FastAPI, Depends, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import datetime
+import random # <--- Nhớ import cái này ở đầu file
 
-# --- 1. SETUP DATABASE ---
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# --- KHO DỮ LIỆU MẪU (DATA SEED) ---
+SAMPLE_ACTIVITIES = [
+    {"title": "☕ Cafe Highland", "desc": "Ra ngồi ngắm phố phường và làm việc.", "icon": "☕", "color": "from-orange-400 to-red-500"},
+    {"title": "🏃 Chạy bộ Hồ Tây", "desc": "Làm một vòng hồ cho khỏe người.", "icon": "🏃", "color": "from-cyan-400 to-blue-500"},
+    {"title": "🎬 Xem phim rạp", "desc": "Check CGV xem bom tấn mới nhất.", "icon": "🎬", "color": "from-purple-400 to-pink-500"},
+    {"title": "🍺 Nhậu Tạ Hiện", "desc": "Lên phố làm vài ly bia cỏ.", "icon": "🍺", "color": "from-yellow-400 to-orange-500"},
+    {"title": "📚 Nhà sách Nhã Nam", "desc": "Đi mua vài cuốn sách về đọc.", "icon": "📚", "color": "from-green-400 to-emerald-500"},
+    {"title": "🧹 Tổng vệ sinh", "desc": "Dọn dẹp phòng ốc sạch bong kin kít.", "icon": "🧹", "color": "from-gray-400 to-gray-600"},
+    {"title": "🍜 Phở Bát Đàn", "desc": "Đi ăn bát phở nóng hổi.", "icon": "🍜", "color": "from-orange-300 to-yellow-500"},
+    {"title": "📸 Chụp ảnh Film", "desc": "Xách máy film đi chụp phố cổ.", "icon": "📸", "color": "from-indigo-400 to-purple-600"},
+    {"title": "🎮 Chơi Game PC", "desc": "Làm vài ván League of Legends hoặc CS2.", "icon": "🎮", "color": "from-red-500 to-pink-600"},
+    {"title": "🧘 Thiền 15p", "desc": "Tịnh tâm, gạt bỏ lo âu.", "icon": "🧘", "color": "from-teal-400 to-green-400"},
+    {"title": "🐶 Dắt chó đi dạo", "desc": "Cho boss đi hóng gió.", "icon": "🐶", "color": "from-yellow-600 to-yellow-800"},
+    {"title": "💻 Code dạo", "desc": "Học thêm một framework mới.", "icon": "💻", "color": "from-slate-700 to-slate-900"},
+    {"title": "🛒 Đi siêu thị", "desc": "Mua đồ ăn tích trữ cho tuần tới.", "icon": "🛒", "color": "from-blue-400 to-indigo-500"},
+    {"title": "🎨 Vẽ tranh", "desc": "Mua màu về vẽ vời linh tinh.", "icon": "🎨", "color": "from-pink-300 to-rose-400"},
+    {"title": "🎤 Karaoke", "desc": "Hát hò xả stress với bạn bè.", "icon": "🎤", "color": "from-violet-500 to-fuchsia-600"},
+    {"title": "🏕️ Cắm trại Ecopark", "desc": "Cuối tuần đi picnic đổi gió.", "icon": "🏕️", "color": "from-green-600 to-lime-500"},
+    {"title": "🎱 Bida lỗ", "desc": "Làm vài cơ bi-a với anh em.", "icon": "🎱", "color": "from-gray-800 to-black"},
+    {"title": "🏸 Đánh cầu lông", "desc": "Vận động nhẹ nhàng buổi chiều.", "icon": "🏸", "color": "from-blue-300 to-cyan-400"},
+    {"title": "🥩 Nướng BBQ", "desc": "Tự mua thịt về nướng tại gia.", "icon": "🥩", "color": "from-red-600 to-orange-700"},
+    {"title": "💆 Gội đầu dưỡng sinh", "desc": "Thư giãn đầu óc, massage cổ vai gáy.", "icon": "💆", "color": "from-teal-200 to-teal-400"}
+]
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
-
-# Model Activities (Khớp với bảng SQL)
-class Activity(Base):
-    __tablename__ = "activities"
-    id = Column(Integer, primary_key=True, index=True)
-    user_uid = Column(String, index=True)
-    title = Column(String)
-    description = Column(Text)
-    priority = Column(String, default="Medium") # High, Medium, Low
-    is_completed = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-Base.metadata.create_all(bind=engine)
-
-# --- 2. SETUP APP ---
-if not firebase_admin._apps:
-    firebase_admin.initialize_app()
-
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
-
-# --- 3. UTILS ---
-def get_db():
-    db = SessionLocal()
-    try: yield db
-    finally: db.close()
-
-async def verify_token(authorization: str = Header(...)):
-    try:
-        token = authorization.split("Bearer ")[1]
-        return auth.verify_id_token(token)
-    except:
-        raise HTTPException(status_code=401, detail="Token invalid")
-
-# --- 4. DATA MODELS (Pydantic) ---
-class ActivityCreate(BaseModel):
-    title: str
-    description: str = ""
-    priority: str = "Medium"
-
-class ActivityUpdate(BaseModel):
-    is_completed: bool
-
-# --- 5. APIs ---
-
-@app.get("/")
-def home(): return {"msg": "Autonomy API Ready"}
-
-# Lấy danh sách hoạt động
-@app.get("/api/activities")
-def get_activities(user = Depends(verify_token), db: Session = Depends(get_db)):
-    return db.query(Activity).filter(Activity.user_uid == user['uid']).order_by(Activity.id.desc()).all()
-
-# Tạo hoạt động mới
-@app.post("/api/activities")
-def create_activity(item: ActivityCreate, user = Depends(verify_token), db: Session = Depends(get_db)):
-    new_act = Activity(user_uid=user['uid'], title=item.title, description=item.description, priority=item.priority)
-    db.add(new_act)
-    db.commit()
-    return {"msg": "Success", "data": new_act}
-
-# Đánh dấu hoàn thành / chưa hoàn thành
-@app.put("/api/activities/{act_id}")
-def update_status(act_id: int, item: ActivityUpdate, user = Depends(verify_token), db: Session = Depends(get_db)):
-    act = db.query(Activity).filter(Activity.id == act_id, Activity.user_uid == user['uid']).first()
-    if not act: raise HTTPException(404, "Not found")
-    act.is_completed = item.is_completed
-    db.commit()
-    return {"msg": "Updated"}
-
-# Xóa hoạt động
-@app.delete("/api/activities/{act_id}")
-def delete_activity(act_id: int, user = Depends(verify_token), db: Session = Depends(get_db)):
-    act = db.query(Activity).filter(Activity.id == act_id, Activity.user_uid == user['uid']).first()
-    if not act: raise HTTPException(404, "Not found")
-    db.delete(act)
-    db.commit()
-    return {"msg": "Deleted"}
+# --- API MỚI: LẤY GỢI Ý (SUGGESTIONS) ---
+@app.get("/api/suggestions")
+def get_suggestions():
+    # Mỗi lần gọi sẽ trả về 10 hoạt động ngẫu nhiên từ kho
+    # Xáo trộn danh sách
+    shuffled = random.sample(SAMPLE_ACTIVITIES, len(SAMPLE_ACTIVITIES))
+    # Gán ID giả để React không bị lỗi key
+    results = []
+    for idx, item in enumerate(shuffled[:10]): # Lấy 10 cái đầu
+        results.append({
+            "id": idx + 1000, # ID to để không trùng ID trong DB
+            "title": item["title"],
+            "desc": item["desc"],
+            "icon": item["icon"],
+            "color": item["color"]
+        })
+    return results
