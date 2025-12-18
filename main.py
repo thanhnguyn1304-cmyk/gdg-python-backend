@@ -40,8 +40,6 @@ class Activity(Base):
     is_completed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-Base.metadata.create_all(bind=engine)
-
 # 3. APP
 if not firebase_admin._apps:
     firebase_admin.initialize_app()
@@ -60,69 +58,57 @@ async def verify_token(authorization: str = Header(...)):
     except:
         raise HTTPException(status_code=401, detail="Token invalid")
 
-# --- DANH SÁCH DỰ PHÒNG (BACKUP) KHI AI LỖI ---
-# Danh sách này có sẵn LINK ẢNH để đảm bảo app luôn đẹp
+# --- DANH SÁCH DỰ PHÒNG (BACKUP) - ẢNH THẬT ---
 BACKUP_ACTIVITIES = [
-    {"title": "Cafe làm việc", "desc": "Tìm một góc yên tĩnh và tập trung.", "keyword": "coffee shop working"},
-    {"title": "Chạy bộ công viên", "desc": "Hít thở không khí trong lành.", "keyword": "running park morning"},
-    {"title": "Nấu ăn tại gia", "desc": "Thử làm món Pasta hoặc Steak.", "keyword": "cooking pasta home kitchen"},
-    {"title": "Đọc sách bên cửa sổ", "desc": "Thả hồn vào những trang sách.", "keyword": "reading book window rain"},
-    {"title": "Đi dạo phố đêm", "desc": "Ngắm nhìn thành phố lên đèn.", "keyword": "city night street walking"},
-    {"title": "Cắm trại cuối tuần", "desc": "Về với thiên nhiên.", "keyword": "camping tent forest fire"},
-    {"title": "Chơi Guitar", "desc": "Học một bản nhạc mới.", "keyword": "playing guitar acoustic"},
-    {"title": "Vẽ tranh", "desc": "Sáng tạo với màu nước.", "keyword": "painting watercolor art"},
-    {"title": "Yoga buổi sáng", "desc": "Thư giãn gân cốt.", "keyword": "yoga woman morning sun"},
-    {"title": "Chụp ảnh Film", "desc": "Lưu giữ khoảnh khắc hoài cổ.", "keyword": "film photography camera street"}
+    {"title": "Cafe làm việc", "desc": "Tìm một góc yên tĩnh và tập trung.", "keyword": "coffee"},
+    {"title": "Chạy bộ công viên", "desc": "Hít thở không khí trong lành.", "keyword": "running"},
+    {"title": "Nấu ăn tại gia", "desc": "Thử làm món Pasta hoặc Steak.", "keyword": "cooking"},
+    {"title": "Đọc sách", "desc": "Thả hồn vào những trang sách.", "keyword": "book"},
+    {"title": "Dạo phố đêm", "desc": "Ngắm nhìn thành phố lên đèn.", "keyword": "city,night"},
+    {"title": "Cắm trại", "desc": "Về với thiên nhiên.", "keyword": "camping"},
+    {"title": "Chơi Guitar", "desc": "Học một bản nhạc mới.", "keyword": "guitar"},
+    {"title": "Vẽ tranh", "desc": "Sáng tạo với màu nước.", "keyword": "painting"},
+    {"title": "Yoga", "desc": "Thư giãn gân cốt buổi sáng.", "keyword": "yoga"},
+    {"title": "Chụp ảnh", "desc": "Lưu giữ khoảnh khắc đời thường.", "keyword": "camera"}
 ]
 
-# 4. API GỢI Ý (Đã nâng cấp)
+# Hàm lấy link ảnh thật từ LoremFlickr
+def get_real_image(keyword, lock_id):
+    # lock_id giúp ảnh cố định không bị nhảy lung tung khi refresh
+    return f"https://loremflickr.com/400/600/{keyword}?lock={lock_id}"
+
+# 4. API GỢI Ý
 @app.get("/api/suggestions")
-def get_ai_suggestions(user_uid: str = None, db: Session = Depends(get_db)):
-    # --- CÁCH 1: DÙNG AI (NẾU CÓ KEY) ---
+def get_suggestions(user_uid: str = None, db: Session = Depends(get_db)):
+    # --- ƯU TIÊN 1: DÙNG AI ĐỂ LẤY Ý TƯỞNG MỚI ---
     if GEMINI_API_KEY:
         try:
-            # Lấy lịch sử để AI học
-            history_text = ""
-            if user_uid:
-                past = db.query(Activity).filter(Activity.user_uid == user_uid).order_by(Activity.id.desc()).limit(3).all()
-                if past:
-                    titles = ", ".join([p.title for p in past])
-                    history_text = f"User thích: {titles}."
-
-            # Prompt ngẫu nhiên để tránh lặp lại
-            random_vibe = random.choice(["năng động", "thư giãn", "sáng tạo", "học tập", "khám phá"])
-            
-            prompt = f"""
-            Đóng vai trợ lý. {history_text}. Hãy gợi ý 5 hoạt động theo phong cách '{random_vibe}'.
-            Trả về JSON list: [{{ "title": "...", "desc": "...", "keyword": "english keyword for image generation" }}]
-            Keyword phải là tiếng Anh để tạo ảnh (ví dụ: 'coffee', 'sunset', 'gym').
-            Chỉ trả về JSON.
+            # Prompt ngắn gọn
+            prompt = """
+            Gợi ý 5 hoạt động giải trí/học tập thú vị.
+            Trả về JSON list: [{"title": "...", "desc": "...", "keyword": "english_one_word"}]
+            Keyword phải là 1 từ tiếng Anh đơn giản để tìm ảnh (vd: 'cat', 'sky', 'food').
             """
-            
             response = model.generate_content(prompt)
             text_clean = response.text.replace("```json", "").replace("```", "").strip()
             data = json.loads(text_clean)
             
             results = []
             for idx, item in enumerate(data):
-                # Tạo link ảnh Pollinations
-                kw = item.get('keyword', 'lifestyle').replace(" ", "%20")
-                img = f"https://image.pollinations.ai/prompt/{kw}?width=400&height=600&nologo=true"
+                # Tạo link ảnh thật
+                img = get_real_image(item.get('keyword', 'life'), idx + 9000)
                 results.append({"id": idx + 9000, "title": item['title'], "desc": item['desc'], "image_url": img})
             
             return results
-
         except Exception as e:
-            print(f"AI Lỗi (Dùng Backup): {e}")
-            # Nếu AI lỗi -> Chạy xuống CÁCH 2
+            print(f"AI Error: {e}")
+            # Nếu AI lỗi -> Tự động xuống dùng Backup
     
-    # --- CÁCH 2: DÙNG DANH SÁCH DỰ PHÒNG (BACKUP) ---
-    # Lấy ngẫu nhiên 5 cái từ danh sách backup
+    # --- ƯU TIÊN 2: DÙNG DANH SÁCH CỐ ĐỊNH (Rất nhanh) ---
     shuffled = random.sample(BACKUP_ACTIVITIES, 5)
     results = []
     for idx, item in enumerate(shuffled):
-        kw = item['keyword'].replace(" ", "%20")
-        img = f"https://image.pollinations.ai/prompt/{kw}?width=400&height=600&nologo=true"
+        img = get_real_image(item['keyword'], idx)
         results.append({
             "id": idx + 1000,
             "title": item['title'],
@@ -146,6 +132,9 @@ def get_my_list(user = Depends(verify_token), db: Session = Depends(get_db)):
 
 @app.post("/api/activities")
 def create_activity(item: ActivityCreate, user = Depends(verify_token), db: Session = Depends(get_db)):
+    # Tự tạo bảng nếu chưa có (Backup logic)
+    Base.metadata.create_all(bind=engine)
+    
     new_act = Activity(user_uid=user['uid'], title=item.title, description=item.description, image_url=item.image_url)
     db.add(new_act)
     db.commit()
